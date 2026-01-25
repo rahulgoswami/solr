@@ -19,6 +19,7 @@ import argparse
 import codecs
 import datetime
 import filecmp
+import glob
 import hashlib
 import http.client
 import os
@@ -27,7 +28,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
+import time
 import traceback
 import urllib.error
 import urllib.parse
@@ -46,6 +49,14 @@ SOLRJ_JAVA_VERSION = "17"
 
 cygwin = platform.system().lower().startswith('cygwin')
 cygwinWindowsRoot = os.popen('cygpath -w /').read().strip().replace('\\','/') if cygwin else ''
+is_windows = platform.system().lower().startswith('windows')
+
+def get_gradlew_cmd():
+  """Returns the appropriate gradlew command for the platform."""
+  if is_windows:
+    return 'gradlew.bat'
+  else:
+    return './gradlew'
 
 
 def unshortenURL(url):
@@ -651,39 +662,40 @@ def verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs):
 
   if isSrc:
     print('    make sure no JARs/WARs in src dist...')
-    lines = os.popen('find . -name \\*.jar').readlines()
-    if len(lines) != 0:
+    jar_files = glob.glob('**/*.jar', recursive=True)
+    if len(jar_files) != 0:
       print('    FAILED:')
-      for line in lines:
-        print('      %s' % line.strip())
+      for jar_file in jar_files:
+        print('      %s' % jar_file)
       raise RuntimeError('source release has JARs...')
-    lines = os.popen('find . -name \\*.war').readlines()
-    if len(lines) != 0:
+    war_files = glob.glob('**/*.war', recursive=True)
+    if len(war_files) != 0:
       print('    FAILED:')
-      for line in lines:
-        print('      %s' % line.strip())
+      for war_file in war_files:
+        print('      %s' % war_file)
       raise RuntimeError('source release has WARs...')
 
-    validateCmd = './gradlew --no-daemon check -p solr/documentation'
+    gradlew = get_gradlew_cmd()
+    validateCmd = '%s --no-daemon check -p solr/documentation' % gradlew
     print('    run "%s"' % validateCmd)
     java.run_java(validateCmd, '%s/validate.log' % unpackPath)
 
     print("    run tests w/ Java %s and testArgs='%s'..." % (BASE_JAVA_VERSION, testArgs))
-    java.run_java('./gradlew --no-daemon test %s' % testArgs, '%s/test.log' % unpackPath)
+    java.run_java('%s --no-daemon test %s' % (gradlew, testArgs), '%s/test.log' % unpackPath)
     print("    run integration tests w/ Java %s" % BASE_JAVA_VERSION)
-    java.run_java('./gradlew --no-daemon integrationTest -Dversion.release=%s' % version, '%s/itest.log' % unpackPath)
+    java.run_java('%s --no-daemon integrationTest -Dversion.release=%s' % (gradlew, version), '%s/itest.log' % unpackPath)
     print("    build binary release w/ Java %s" % BASE_JAVA_VERSION)
-    java.run_java('./gradlew --no-daemon dev -Dversion.release=%s' % version, '%s/assemble.log' % unpackPath)
+    java.run_java('%s --no-daemon dev -Dversion.release=%s' % (gradlew, version), '%s/assemble.log' % unpackPath)
     testSolrExample("%s/solr/packaging/build/dev" % unpackPath, java.java_home, False)
 
     if java.run_alt_javas:
       for run_alt_java, alt_java_version in zip(java.run_alt_javas, java.alt_java_versions):
         print("    run tests w/ Java %s and testArgs='%s'..." % (alt_java_version, testArgs))
-        run_alt_java('./gradlew --no-daemon clean test %s' % testArgs, '%s/test-java%s.log' % (unpackPath, alt_java_version))
+        run_alt_java('%s --no-daemon clean test %s' % (gradlew, testArgs), '%s/test-java%s.log' % (unpackPath, alt_java_version))
         print("    run integration tests w/ Java %s" % alt_java_version)
-        run_alt_java('./gradlew --no-daemon integrationTest -Dversion.release=%s' % version, '%s/itest-java%s.log' % (unpackPath, alt_java_version))
+        run_alt_java('%s --no-daemon integrationTest -Dversion.release=%s' % (gradlew, version), '%s/itest-java%s.log' % (unpackPath, alt_java_version))
         print("    build binary release w/ Java %s" % alt_java_version)
-        run_alt_java('./gradlew --no-daemon dev -Dversion.release=%s' % version, '%s/assemble-java%s.log' % (unpackPath, alt_java_version))
+        run_alt_java('%s --no-daemon dev -Dversion.release=%s' % (gradlew, version), '%s/assemble-java%s.log' % (unpackPath, alt_java_version))
         testSolrExample("%s/solr/packaging/build/dev" % unpackPath, run_alt_java, False)
 
   else:
@@ -769,22 +781,31 @@ def testSolrExample(binaryDistPath, javaPath, isSlim):
 
   # Stop Solr running on port 8983 (in case a previous run didn't shutdown cleanly)
   try:
-      if not cygwin:
-        subprocess.call(['bin/solr','stop','-p','8983'])
-      else:
+      if is_windows:
+        subprocess.call(['bin\\solr.cmd','stop','-p','8983'])
+      elif cygwin:
         subprocess.call('env "PATH=`cygpath -S -w`:$PATH" bin/solr.cmd stop -p 8983', shell=True)
+      else:
+        subprocess.call(['bin/solr','stop','-p','8983'])
   except:
      print('      Stop failed due to: '+sys.exc_info()[0])
 
   print('      Running %s example on port 8983 from %s' % (example, binaryDistPath))
   try:
-    if not cygwin:
-      runExampleStatus = subprocess.call(['bin/solr','start','-e',example])
-    else:
+    if is_windows:
+      runExampleStatus = subprocess.call(['bin\\solr.cmd','start','-e',example])
+    elif cygwin:
       runExampleStatus = subprocess.call('env "PATH=`cygpath -S -w`:$PATH" bin/solr.cmd -e ' + example, shell=True)
+    else:
+      runExampleStatus = subprocess.call(['bin/solr','start','-e',example])
 
     if runExampleStatus != 0:
       raise RuntimeError('Failed to run the %s example, check log for previous errors.' % example)
+
+    # On Windows, give Solr a moment to fully initialize after the example starts
+    if is_windows:
+      print('      waiting for Solr to stabilize...')
+      time.sleep(5)
 
     os.chdir('example')
     print('      run query...')
@@ -801,10 +822,12 @@ def testSolrExample(binaryDistPath, javaPath, isSlim):
     print('      stop server using: bin/solr stop -p 8983')
     os.chdir(binaryDistPath)
 
-    if not cygwin:
-      subprocess.call(['bin/solr','stop','-p','8983'])
-    else:
+    if is_windows:
+      subprocess.call(['bin\\solr.cmd','stop','-p','8983'])
+    elif cygwin:
       subprocess.call('env "PATH=`cygpath -S -w`:$PATH" bin/solr.cmd stop -p 8983', shell=True)
+    else:
+      subprocess.call(['bin/solr','stop','-p','8983'])
 
   os.chdir(old_cwd)
 
@@ -1032,10 +1055,17 @@ def make_java_config(parser, alt_java_homes):
   def _make_runner(java_home, is_base_version=False):
     if cygwin:
       java_home = subprocess.check_output('cygpath -u "%s"' % java_home, shell=True).decode('utf-8').strip()
-    cmd_prefix = 'export JAVA_HOME="%s" PATH="%s/bin:$PATH" JAVACMD="%s/bin/java"' % \
-                 (java_home, java_home, java_home)
-    s = subprocess.check_output('%s; java -version' % cmd_prefix,
-                                shell=True, stderr=subprocess.STDOUT).decode('utf-8')
+    if is_windows:
+      # Use Windows cmd.exe syntax
+      cmd_prefix = 'set "JAVA_HOME=%s" && set "PATH=%s\\bin;%%PATH%%" && set "JAVACMD=%s\\bin\\java"' % \
+                   (java_home, java_home, java_home)
+      s = subprocess.check_output('%s && java -version' % cmd_prefix,
+                                  shell=True, stderr=subprocess.STDOUT).decode('utf-8')
+    else:
+      cmd_prefix = 'export JAVA_HOME="%s" PATH="%s/bin:$PATH" JAVACMD="%s/bin/java"' % \
+                   (java_home, java_home, java_home)
+      s = subprocess.check_output('%s; java -version' % cmd_prefix,
+                                  shell=True, stderr=subprocess.STDOUT).decode('utf-8')
     actual_version = re.search(r'version "([1-9][0-9]*)', s).group(1)
     print('Java %s JAVA_HOME=%s' % (actual_version, java_home))
 
@@ -1046,8 +1076,12 @@ def make_java_config(parser, alt_java_homes):
       else:
         if int(actual_version) < int(BASE_JAVA_VERSION):
           parser.error('got wrong version for java %s, less than base version %s:\n%s' % (actual_version, BASE_JAVA_VERSION, s))
-    def run_java(cmd, logfile):
-      run('%s; %s' % (cmd_prefix, cmd), logfile)
+    if is_windows:
+      def run_java(cmd, logfile):
+        run('%s && %s' % (cmd_prefix, cmd), logfile)
+    else:
+      def run_java(cmd, logfile):
+        run('%s; %s' % (cmd_prefix, cmd), logfile)
     return run_java, actual_version
 
   java_home =  os.environ.get('JAVA_HOME')
@@ -1120,7 +1154,7 @@ def parse_config():
   if c.tmp_dir:
     c.tmp_dir = os.path.abspath(c.tmp_dir)
   else:
-    tmp = '/tmp/smoke_solr_%s_%s' % (c.version, c.revision)
+    tmp = os.path.join(tempfile.gettempdir(), 'smoke_solr_%s_%s' % (c.version, c.revision))
     c.tmp_dir = tmp
     i = 1
     while os.path.exists(c.tmp_dir):
@@ -1193,7 +1227,7 @@ def smokeTest(java, baseURL, gitRevision, version, tmpDir, isSigned, local_keys,
     keysFileURL = "https://archive.apache.org/dist/solr/KEYS"
     print("    Downloading online KEYS file %s" % keysFileURL)
     scriptutil.download('KEYS', keysFileURL, tmpDir, force_clean=FORCE_CLEAN)
-    keysFile = '%s/KEYS' % (tmpDir)
+    keysFile = os.path.join(tmpDir, 'KEYS')
 
   if is_port_in_use(8983):
     raise RuntimeError('Port 8983 is already in use. The smoketester needs it to test Solr')

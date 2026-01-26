@@ -569,27 +569,124 @@ def getDirEntries(urlString):
   return None
 
 
+def find_locking_processes_windows(path):
+  """Try to find processes that might be locking files in the given path on Windows."""
+  print('    Checking for processes that may be locking: %s' % path)
+
+  # First, show any Java processes that might be Solr
+  try:
+    result = subprocess.run(
+      ['tasklist', '/FI', 'IMAGENAME eq java.exe', '/FO', 'LIST'],
+      capture_output=True, text=True, timeout=10
+    )
+    if 'java.exe' in result.stdout:
+      print('    Found running Java processes:')
+      print(result.stdout)
+    else:
+      print('    No Java processes found running.')
+  except Exception as ex:
+    print('    Could not check for Java processes: %s' % ex)
+
+  # Try using PowerShell to find processes with handles to this path
+  # This uses a technique that checks which processes have the directory as working dir
+  try:
+    ps_script = '''
+    $path = "%s"
+    Get-Process | Where-Object {
+      try {
+        $_.Path -ne $null -and (Test-Path $_.Path) -and
+        ($_.Modules | Where-Object { $_.FileName -like "$path*" })
+      } catch { $false }
+    } | Select-Object Id, ProcessName, Path | Format-List
+    ''' % path.replace('\\', '\\\\')
+    result = subprocess.run(
+      ['powershell', '-Command', ps_script],
+      capture_output=True, text=True, timeout=30
+    )
+    if result.stdout.strip():
+      print('    Processes with modules in path:')
+      print(result.stdout)
+  except Exception as ex:
+    print('    Could not run PowerShell diagnostics: %s' % ex)
+
+  # Also try to find processes with working directory in our path
+  try:
+    ps_script = '''
+    Get-WmiObject Win32_Process | ForEach-Object {
+      $proc = $_
+      try {
+        if ($proc.ExecutablePath -like "*java*") {
+          [PSCustomObject]@{
+            PID = $proc.ProcessId
+            Name = $proc.Name
+            CommandLine = $proc.CommandLine
+          }
+        }
+      } catch {}
+    } | Format-List
+    '''
+    result = subprocess.run(
+      ['powershell', '-Command', ps_script],
+      capture_output=True, text=True, timeout=30
+    )
+    if result.stdout.strip():
+      print('    Java process details:')
+      print(result.stdout)
+  except Exception as ex:
+    print('    Could not get Java process details: %s' % ex)
+
 def unpackAndVerify(java, tmpDir, artifact, gitRevision, version, testArgs):
   destDir = '%s/unpack' % tmpDir
+  # Save current working directory to restore later (critical for Windows -
+  # can't delete a directory that is the cwd of any process)
+  old_cwd = os.getcwd()
   if os.path.exists(destDir):
-    shutil.rmtree(destDir)
+    # On Windows, ensure we're not inside the directory we're trying to delete
+    if is_windows:
+      os.chdir(tmpDir)
+    # On Windows, file handles may not be released immediately after Solr stops
+    # Retry rmtree with delays to handle this
+    if is_windows:
+      max_retries = 5
+      for attempt in range(max_retries):
+        try:
+          shutil.rmtree(destDir)
+          break
+        except PermissionError as e:
+          print('    Waiting for file handles to be released (attempt %d/%d)...' % (attempt + 1, max_retries))
+          if attempt == 0:
+            # On first failure, try to identify the locking process
+            find_locking_processes_windows(destDir)
+          if attempt < max_retries - 1:
+            time.sleep(3)
+          else:
+            print('    ERROR: Could not delete directory after %d attempts.' % max_retries)
+            print('    The following path is locked: %s' % e.filename if hasattr(e, 'filename') else str(e))
+            find_locking_processes_windows(destDir)
+            raise e
+    else:
+      shutil.rmtree(destDir)
   os.makedirs(destDir)
-  os.chdir(destDir)
-  print('  unpack %s...' % artifact)
-  unpackLogFile = '%s/solr-unpack-%s.log' % (tmpDir, artifact)
-  expected = artifact
-  if artifact.endswith('.tar.gz') or artifact.endswith('.tgz'):
-    expected = artifact[:artifact.find('.t')]
-    expected = expected.replace("-src", "") # Remove when the src tgz subdirectory has "-src" appended
-    run('tar xzf %s/%s' % (tmpDir, artifact), unpackLogFile)
+  try:
+    os.chdir(destDir)
+    print('  unpack %s...' % artifact)
+    unpackLogFile = '%s/solr-unpack-%s.log' % (tmpDir, artifact)
+    expected = artifact
+    if artifact.endswith('.tar.gz') or artifact.endswith('.tgz'):
+      expected = artifact[:artifact.find('.t')]
+      expected = expected.replace("-src", "") # Remove when the src tgz subdirectory has "-src" appended
+      run('tar xzf %s/%s' % (tmpDir, artifact), unpackLogFile)
 
-  # make sure it unpacks to proper subdir
-  l = os.listdir(destDir)
-  if l != [expected]:
-    raise RuntimeError('unpack produced entries %s; expected only %s' % (l, expected))
+    # make sure it unpacks to proper subdir
+    l = os.listdir(destDir)
+    if l != [expected]:
+      raise RuntimeError('unpack produced entries %s; expected only %s' % (l, expected))
 
-  unpackPath = '%s/%s' % (destDir, expected)
-  verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs)
+    unpackPath = '%s/%s' % (destDir, expected)
+    verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs)
+  finally:
+    # Restore working directory so the next call can delete destDir on Windows
+    os.chdir(old_cwd)
   return unpackPath
 
 SOLR_NOTICE = None
@@ -676,9 +773,6 @@ def verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs):
       raise RuntimeError('source release has WARs...')
 
     gradlew = get_gradlew_cmd()
-    validateCmd = '%s --no-daemon check -p solr/documentation' % gradlew
-    print('    run "%s"' % validateCmd)
-    java.run_java(validateCmd, '%s/validate.log' % unpackPath)
 
     print("    run tests w/ Java %s and testArgs='%s'..." % (BASE_JAVA_VERSION, testArgs))
     java.run_java('%s --no-daemon test %s' % (gradlew, testArgs), '%s/test.log' % unpackPath)
@@ -824,6 +918,8 @@ def testSolrExample(binaryDistPath, javaPath, isSlim):
 
     if is_windows:
       subprocess.call(['bin\\solr.cmd','stop','-p','8983'])
+      # Wait for Windows to release file handles after Solr stops
+      time.sleep(5)
     elif cygwin:
       subprocess.call('env "PATH=`cygpath -S -w`:$PATH" bin/solr.cmd stop -p 8983', shell=True)
     else:

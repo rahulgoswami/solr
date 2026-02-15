@@ -774,6 +774,10 @@ def verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs):
 
     gradlew = get_gradlew_cmd()
 
+    validateCmd = '%s --no-daemon check -p solr/documentation' % gradlew
+    print('    run "%s"' % validateCmd)
+    java.run_java(validateCmd, '%s/validate.log' % unpackPath)
+
     print("    run tests w/ Java %s and testArgs='%s'..." % (BASE_JAVA_VERSION, testArgs))
     java.run_java('%s --no-daemon test %s' % (gradlew, testArgs), '%s/test.log' % unpackPath)
     print("    run integration tests w/ Java %s" % BASE_JAVA_VERSION)
@@ -1250,7 +1254,17 @@ def parse_config():
   if c.tmp_dir:
     c.tmp_dir = os.path.abspath(c.tmp_dir)
   else:
-    tmp = os.path.join(tempfile.gettempdir(), 'smoke_solr_%s_%s' % (c.version, c.revision))
+    if is_windows:
+      # Use a short temp path and truncated revision on Windows to avoid
+      # exceeding the 260-char MAX_PATH limit when javadoc output produces
+      # deeply nested file paths.
+      tmp_base = 'C:\\tmp'
+      if not os.path.exists(tmp_base):
+        os.makedirs(tmp_base)
+      tmp = os.path.join(tmp_base, 'ssmk_%s_%s' % (c.version, c.revision[:8]))
+    else:
+      tmp_base = tempfile.gettempdir()
+      tmp = os.path.join(tmp_base, 'smoke_solr_%s_%s' % (c.version, c.revision))
     c.tmp_dir = tmp
     i = 1
     while os.path.exists(c.tmp_dir):

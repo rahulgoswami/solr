@@ -780,8 +780,11 @@ def verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs):
 
     print("    run tests w/ Java %s and testArgs='%s'..." % (BASE_JAVA_VERSION, testArgs))
     java.run_java('%s --no-daemon test %s' % (gradlew, testArgs), '%s/test.log' % unpackPath)
-    print("    run integration tests w/ Java %s" % BASE_JAVA_VERSION)
-    java.run_java('%s --no-daemon integrationTest -Dversion.release=%s' % (gradlew, version), '%s/itest.log' % unpackPath)
+    if is_windows:
+      print("    skipping integration tests on Windows (since BATS tests not supported)")
+    else:
+      print("    run integration tests w/ Java %s" % BASE_JAVA_VERSION)
+      java.run_java('%s --no-daemon integrationTest -Dversion.release=%s' % (gradlew, version), '%s/itest.log' % unpackPath)
     print("    build binary release w/ Java %s" % BASE_JAVA_VERSION)
     java.run_java('%s --no-daemon dev -Dversion.release=%s' % (gradlew, version), '%s/assemble.log' % unpackPath)
     testSolrExample("%s/solr/packaging/build/dev" % unpackPath, java.java_home, False)
@@ -790,8 +793,11 @@ def verifyUnpacked(java, artifact, unpackPath, gitRevision, version, testArgs):
       for run_alt_java, alt_java_version in zip(java.run_alt_javas, java.alt_java_versions):
         print("    run tests w/ Java %s and testArgs='%s'..." % (alt_java_version, testArgs))
         run_alt_java('%s --no-daemon clean test %s' % (gradlew, testArgs), '%s/test-java%s.log' % (unpackPath, alt_java_version))
-        print("    run integration tests w/ Java %s" % alt_java_version)
-        run_alt_java('%s --no-daemon integrationTest -Dversion.release=%s' % (gradlew, version), '%s/itest-java%s.log' % (unpackPath, alt_java_version))
+        if is_windows:
+          print("    skipping integration tests on Windows (since BATS tests not supported)")
+        else:
+          print("    run integration tests w/ Java %s" % alt_java_version)
+          run_alt_java('%s --no-daemon integrationTest -Dversion.release=%s' % (gradlew, version), '%s/itest-java%s.log' % (unpackPath, alt_java_version))
         print("    build binary release w/ Java %s" % alt_java_version)
         run_alt_java('%s --no-daemon dev -Dversion.release=%s' % (gradlew, version), '%s/assemble-java%s.log' % (unpackPath, alt_java_version))
         testSolrExample("%s/solr/packaging/build/dev" % unpackPath, run_alt_java, False)

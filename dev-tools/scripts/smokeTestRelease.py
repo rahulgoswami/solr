@@ -1127,7 +1127,7 @@ def verifyDeployedPOMsCoordinates(artifacts, version):
     groupId, artifactId, packaging, POMversion = getPOMcoordinate(treeRoot)
     POMpath = '%s/%s/%s/%s-%s.pom' \
             % (groupId.replace('.', '/'), artifactId, version, artifactId, version)
-    if not POM.endswith(POMpath):
+    if not POM.replace('\\', '/').endswith(POMpath):
       raise RuntimeError("Mismatch between POM coordinate %s:%s:%s and filepath: %s"
                         % (groupId, artifactId, POMversion, POM))
     # Verify that the corresponding artifact exists
